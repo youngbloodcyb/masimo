@@ -113,7 +113,7 @@ export default function Home() {
         renderItem={({ gridIndex }) => {
           const IconComponent = iconForIndex(gridIndex);
           return (
-            <div className="flex items-center justify-center w-full h-full border border-zinc-800 rounded-lg bg-zinc-900">
+            <div className="flex items-center justify-center w-full h-full">
               <IconComponent size={48} weight="duotone" className="text-zinc-400" />
             </div>
           );
