@@ -8,12 +8,11 @@ import React, {
   type RefObject,
 } from "react";
 
-// Grid physics constants
-const MIN_VELOCITY = 0.2;
-const UPDATE_INTERVAL = 16;
-const VELOCITY_HISTORY_SIZE = 5;
-const FRICTION = 0.9;
-const VELOCITY_THRESHOLD = 0.3;
+// Grid physics constants — tuned to mimic iOS UIScrollView
+const MIN_VELOCITY = 0.05; // px/ms — stop threshold
+const DECELERATION_RATE = 0.998; // per-ms decay (iOS uses ~0.998)
+const VELOCITY_WINDOW_MS = 100; // only use touch samples from the last 100ms
+const VELOCITY_SCALE = 17; // convert px/ms → px/frame-equivalent momentum
 
 type Position = {
   x: number;
@@ -94,7 +93,7 @@ export default function InfiniteGrid({
   const startPosRef = useRef<Position>(initialPosition ?? { x: 0, y: 0 });
   const restPosRef = useRef<Position>(initialPosition ?? { x: 0, y: 0 });
   const isDraggingRef = useRef(false);
-  const velocityHistoryRef = useRef<Position[]>([]);
+  const touchSamplesRef = useRef<{ x: number; y: number; t: number }[]>([]);
   const lastMoveTimeRef = useRef(0);
 
   // Keep offset ref in sync
@@ -148,41 +147,44 @@ export default function InfiniteGrid({
   }, [calculateVisiblePositions]);
 
   const animate = useCallback(() => {
-    const currentTime = performance.now();
-    const deltaTime = currentTime - lastUpdateTime.current;
+    const now = performance.now();
+    const dt = now - lastUpdateTime.current;
+    lastUpdateTime.current = now;
 
-    if (deltaTime >= UPDATE_INTERVAL) {
-      const velocity = velocityRef.current;
-      const speed = Math.sqrt(
-        velocity.x * velocity.x + velocity.y * velocity.y
-      );
+    // Clamp dt to avoid huge jumps after tab-switch
+    const clampedDt = Math.min(dt, 64);
 
-      if (speed < MIN_VELOCITY) {
-        velocityRef.current = { x: 0, y: 0 };
-        return;
-      }
+    const velocity = velocityRef.current;
+    const speed = Math.sqrt(
+      velocity.x * velocity.x + velocity.y * velocity.y
+    );
 
-      let deceleration = FRICTION;
-      if (speed < VELOCITY_THRESHOLD) {
-        deceleration = FRICTION * (speed / VELOCITY_THRESHOLD);
-      }
-
-      const newOffset = {
-        x: offsetRef.current.x + velocity.x,
-        y: offsetRef.current.y + velocity.y,
-      };
-      const newVelocity = {
-        x: velocity.x * deceleration,
-        y: velocity.y * deceleration,
-      };
-
-      offsetRef.current = newOffset;
-      velocityRef.current = newVelocity;
-      setOffset(newOffset);
+    if (speed < MIN_VELOCITY) {
+      velocityRef.current = { x: 0, y: 0 };
       updateGridItems();
-
-      lastUpdateTime.current = currentTime;
+      return;
     }
+
+    // iOS-style exponential decay: v(t) = v0 * rate^dt
+    const decay = Math.pow(DECELERATION_RATE, clampedDt);
+
+    // Integrate position: displacement = v0 * (rate^dt - 1) / ln(rate)
+    const lnRate = Math.log(DECELERATION_RATE);
+    const displacement = (decay - 1) / lnRate;
+
+    const newOffset = {
+      x: offsetRef.current.x + velocity.x * displacement,
+      y: offsetRef.current.y + velocity.y * displacement,
+    };
+    const newVelocity = {
+      x: velocity.x * decay,
+      y: velocity.y * decay,
+    };
+
+    offsetRef.current = newOffset;
+    velocityRef.current = newVelocity;
+    setOffset(newOffset);
+    updateGridItems();
 
     animationFrame.current = requestAnimationFrame(animate);
   }, [updateGridItems]);
@@ -198,7 +200,7 @@ export default function InfiniteGrid({
         y: p.y - offsetRef.current.y,
       };
       velocityRef.current = { x: 0, y: 0 };
-      velocityHistoryRef.current = [];
+      touchSamplesRef.current = [];
       isDraggingRef.current = true;
       setIsDragging(true);
 
@@ -211,30 +213,18 @@ export default function InfiniteGrid({
     (p: Position) => {
       if (!isDraggingRef.current) return;
 
-      const currentTime = performance.now();
-      const timeDelta = currentTime - lastMoveTimeRef.current;
+      const now = performance.now();
 
-      const rawVelocity = {
-        x: (p.x - lastPos.current.x) / (timeDelta || 1),
-        y: (p.y - lastPos.current.y) / (timeDelta || 1),
-      };
+      // Record this sample with timestamp
+      touchSamplesRef.current.push({ x: p.x, y: p.y, t: now });
 
-      const history = [...velocityHistoryRef.current, rawVelocity];
-      if (history.length > VELOCITY_HISTORY_SIZE) {
-        history.shift();
-      }
-      velocityHistoryRef.current = history;
-
-      const smoothedVelocity = history.reduce(
-        (acc, vel) => ({
-          x: acc.x + vel.x / history.length,
-          y: acc.y + vel.y / history.length,
-        }),
-        { x: 0, y: 0 }
+      // Prune samples older than the velocity window
+      const cutoff = now - VELOCITY_WINDOW_MS;
+      touchSamplesRef.current = touchSamplesRef.current.filter(
+        (s) => s.t >= cutoff
       );
 
-      velocityRef.current = smoothedVelocity;
-      lastMoveTimeRef.current = currentTime;
+      lastMoveTimeRef.current = now;
 
       const newOffset = {
         x: p.x - startPosRef.current.x,
@@ -252,6 +242,24 @@ export default function InfiniteGrid({
   const handleUp = useCallback(() => {
     isDraggingRef.current = false;
     setIsDragging(false);
+
+    // Compute release velocity from time-windowed touch samples
+    const samples = touchSamplesRef.current;
+    if (samples.length >= 2) {
+      const first = samples[0];
+      const last = samples[samples.length - 1];
+      const dt = last.t - first.t;
+
+      if (dt > 0) {
+        // px/ms velocity, scaled up for momentum
+        velocityRef.current = {
+          x: ((last.x - first.x) / dt) * VELOCITY_SCALE,
+          y: ((last.y - first.y) / dt) * VELOCITY_SCALE,
+        };
+      }
+    }
+
+    lastUpdateTime.current = performance.now();
     animationFrame.current = requestAnimationFrame(animate);
   }, [animate]);
 
