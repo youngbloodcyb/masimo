@@ -12,7 +12,7 @@ import React, {
 const MIN_VELOCITY = 0.05; // px/ms — stop threshold
 const DECELERATION_RATE = 0.998; // per-ms decay (iOS uses ~0.998)
 const VELOCITY_WINDOW_MS = 100; // only use touch samples from the last 100ms
-const VELOCITY_SCALE = 1.5; // convert px/ms → px/frame-equivalent momentum
+const VELOCITY_SCALE = 4.5; // convert px/ms → px/frame-equivalent momentum
 
 type Position = {
   x: number;
